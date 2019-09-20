@@ -6,22 +6,20 @@ package main
 import (
 	"log"
 
-	"github.com/jonathanfisher/DnsFilter/hosts"
 	"github.com/jonathanfisher/DnsFilter/server"
 )
 
 func main() {
-	var err error
-
-	_, err = hosts.ParseUrl("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts")
+	blacklist, err := server.DomainListFromSources([]string{
+		"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed to load blacklist: %v", err)
 	}
 
-	resolver, err := server.NewServer()
-	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
-	}
+	whitelist := server.DomainList{"google.com"}
+
+	resolver := server.NewServerWithFilters(whitelist, blacklist)
 
 	resolver.Listen()
 }

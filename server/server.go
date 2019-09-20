@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net"
+	"sync"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -14,23 +15,44 @@ const (
 
 type dnsServer struct {
 	conn *net.UDPConn
+
+	domainListMutex sync.RWMutex
+	whitelist DomainList
+	blacklist DomainList
 }
 
 type DnsResolver interface {
 	Listen()
 }
 
+// getAnswerForBlockedQuestion returns an Answer for a Question that is intended to be blocked. The returned answer
+// will be of the same type as the question (e.g. IPv4 -> IPv4, IPv6 -> IPv6).
 func getAnswerForBlockedQuestion(question *dnsmessage.Question) dnsmessage.Resource {
+	var body dnsmessage.ResourceBody
+
+	switch question.Type {
+	case dnsmessage.TypeA:
+		body = &dnsmessage.AResource{A: [4]byte{0, 0, 0, 0}}
+		break
+
+	case dnsmessage.TypeAAAA:
+		body = &dnsmessage.AAAAResource{AAAA: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}}
+	}
 	return dnsmessage.Resource{
 		Header: dnsmessage.ResourceHeader{
 			Name:   question.Name,
 			Type:   question.Type,
 			Class:  question.Class,
 		},
-		Body:   &dnsmessage.AResource{A: [4]byte{0, 0, 0, 0}},
+		Body:   body,
 	}
 }
 
+// getAnswersForQuestions creates and returns a list of answers for each of the DNS Questions that were received.
+// The input slices represent the valid and invalid DNS questions, which correspond to the requests that will be
+// forwarded on to an upstream DNS server for valid results, and the invalid questions will get their own special
+// responses for blocked questions.
+// NOTE: This call will block while waiting for communication with the upstream DNS server.
 func (s *dnsServer) getAnswersForQuestions(header *dnsmessage.Header, valid, invalid []dnsmessage.Question) ([]dnsmessage.Resource, error) {
 	var answers []dnsmessage.Resource
 
@@ -54,6 +76,9 @@ func (s *dnsServer) getAnswersForQuestions(header *dnsmessage.Header, valid, inv
 	return answers, nil
 }
 
+// handleReceivedDnsRequest handles raw bytes that represent a DNS request, and filters the requests into valid and
+// invalid ones. Based on these results, a response is formulated and sent back to the remoteAddr.
+// NOTE: This is intended to be run as a goroutine, and as such, everything in this call should be thread-safe.
 func (s *dnsServer) handleReceivedDnsRequest(buf []byte, remoteAddr *net.UDPAddr) {
 	var msg dnsmessage.Message
 
@@ -69,7 +94,7 @@ func (s *dnsServer) handleReceivedDnsRequest(buf []byte, remoteAddr *net.UDPAddr
 	}
 
 	valid, invalid := s.Filter(&msg)
-	log.Printf("Valid: %v, Invalid: %v", len(valid), len(invalid))
+	log.Printf("Valid: %v [%v], Invalid: %v [%v]", len(valid), valid, len(invalid), invalid)
 
 	// Create the response that we will use.
 	dnsResponse := dnsmessage.Message{
@@ -83,6 +108,7 @@ func (s *dnsServer) handleReceivedDnsRequest(buf []byte, remoteAddr *net.UDPAddr
 		Authorities: nil,
 		Additionals: nil,
 	}
+
 	answers, err := s.getAnswersForQuestions(&msg.Header, valid, invalid)
 	if err != nil {
 		log.Printf("failed to get answers: %v", err)
@@ -103,6 +129,25 @@ func (s *dnsServer) handleReceivedDnsRequest(buf []byte, remoteAddr *net.UDPAddr
 	}
 }
 
+// SetBlacklist sets the current dnsServer's whitelist to the given list. Note that this utilizes the mutex to be
+// thread-safe.
+func (s *dnsServer) SetWhitelist(list DomainList) {
+	s.domainListMutex.Lock()
+	defer s.domainListMutex.Unlock()
+	s.whitelist = list
+}
+
+// SetBlacklist sets the current dnsServer's blacklist to the given list. Note that this utilizes the mutex to be
+// thread-safe.
+func (s *dnsServer) SetBlacklist(list DomainList) {
+	s.domainListMutex.Lock()
+	defer s.domainListMutex.Unlock()
+	s.blacklist = list
+}
+
+// Listen will listen on port 53 for UDP packets, and when they are received, will determine whether they are meant to
+// be blocked or whether they need to be passed along to the upstream nameserver.
+// NOTE: This call will block indefinitely.
 func (s dnsServer) Listen() {
 	var err error
 
@@ -112,6 +157,7 @@ func (s dnsServer) Listen() {
 	}
 	defer s.conn.Close()
 
+	log.Printf("Listening on port %v", DefaultDnsPortNumber)
 	for {
 		packetBuffer := make([]byte, DefaultDnsPacketLength)
 		_, remoteAddr, err := s.conn.ReadFromUDP(packetBuffer)
@@ -123,9 +169,15 @@ func (s dnsServer) Listen() {
 	}
 }
 
-// NewServer creates and returns a newly created DnsResolver
-func NewServer() (DnsResolver, error) {
-	var server dnsServer
+// NewServer creates and returns a default DnsResolver
+func NewServer() DnsResolver {
+	return dnsServer{}
+}
 
-	return server, nil
+// NewServerWithFilters creates and returns a DnsResolver with the given whitelist and blacklist in place.
+func NewServerWithFilters(whitelist, blacklist DomainList) DnsResolver {
+	return dnsServer{
+		whitelist:       whitelist,
+		blacklist:       blacklist,
+	}
 }

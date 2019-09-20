@@ -1,17 +1,24 @@
 package server
 
-import "golang.org/x/net/dns/dnsmessage"
+import (
+	"golang.org/x/net/dns/dnsmessage"
+	"strings"
+)
 
 type DnsFilter interface {
 	Filter(*dnsmessage.Message) ([]dnsmessage.Question, []dnsmessage.Question)
 }
 
-func domainIsWhitelisted(domain string) bool {
-	return false
+func (s *dnsServer) domainIsWhitelisted(domain string) bool {
+	s.domainListMutex.RLock()
+	defer s.domainListMutex.RUnlock()
+	return s.whitelist.Contains(domain)
 }
 
-func domainIsBlacklisted(domain string) bool {
-	return false
+func (s *dnsServer) domainIsBlacklisted(domain string) bool {
+	s.domainListMutex.RLock()
+	defer s.domainListMutex.RUnlock()
+	return s.blacklist.Contains(domain)
 }
 
 // Filter iterates through a DNS Request message's Questions and sorts them into valid and invalid lists.
@@ -21,7 +28,10 @@ func (s *dnsServer) Filter(msg *dnsmessage.Message) ([]dnsmessage.Question, []dn
 	var valid, invalid []dnsmessage.Question
 
 	for _, question := range msg.Questions {
-		if domainIsWhitelisted(question.Name.GoString()) || !domainIsBlacklisted(question.Name.GoString()) {
+		// If the domain contains a trailing period, we trim it here.
+		domain := strings.TrimSuffix(question.Name.String(), ".")
+
+		if s.domainIsWhitelisted(domain) || !s.domainIsBlacklisted(domain) {
 			valid = append(valid, question)
 		} else {
 			invalid = append(invalid, question)

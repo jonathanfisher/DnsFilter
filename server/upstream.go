@@ -21,6 +21,7 @@ func getDnsServer() net.IP {
 // QueryUpstreamDns takes a pre-constructed DNS request message and sends it to an upstream DNS server. Then wait for
 // a response from that server and return it to the caller.
 // TODO: An obvious optimization here would be to have one goroutine that handles all traffic between here & upstream.
+// TODO: What do we do if we don't receive a response in a reasonable amount of time (i.e. when a packet is lost)
 func (s *dnsServer) QueryUpstreamDns(message *dnsmessage.Message) (dnsmessage.Message, error) {
 	packedMessage, err := message.Pack()
 	if err != nil {
