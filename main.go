@@ -12,7 +12,7 @@ import (
 
 func main() {
 	var err error
-	
+
 	_, err = hosts.ParseUrl("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts")
 	if err != nil {
 		panic(err)

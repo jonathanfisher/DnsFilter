@@ -3,16 +3,24 @@ package hosts
 import (
 	"bufio"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 )
 
-type Map map[string]string
+type Map map[string]net.IP
 
 func clearComments(s string) string {
 	parts := strings.Split(s, "#")
 	return parts[0]
+}
+
+func parseIP(ip string) net.IP {
+	// Strip out the interface information (if it exists).
+	// TODO: Figure out how to use this information.
+	return net.ParseIP(strings.Split(ip, "%")[0])
 }
 
 // Parse takes an input stream and attempts to parse out the hosts file map. If it fails, an error is returned.
@@ -30,8 +38,18 @@ func Parse(input io.ReadCloser) (Map, error) {
 			// address that the following fields should resolve to.
 			fields := strings.Fields(withoutComments)
 			if len(fields) >= 2 {
+				// Parse the IP from the first field. Note that this field can optionally contain interface information
+				// For example: fe80::1%lo0 indicates using the lo0 interface. Right now, this information is being
+				// discarded.
+				// TODO: Figure out how to incorporate this information.
+				ip := parseIP(fields[0])
+
+				if ip == nil {
+					log.Printf("Invalid IP Address: %v", fields[0])
+					continue
+				}
 				for i := 1; i < len(fields); i++ {
-					hostsMap[fields[i]] = fields[0]
+					hostsMap[fields[i]] = ip
 				}
 			}
 		}
