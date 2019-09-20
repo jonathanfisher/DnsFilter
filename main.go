@@ -6,10 +6,18 @@ package main
 import (
 	"log"
 
+	"github.com/jonathanfisher/DnsFilter/hosts"
 	"github.com/jonathanfisher/DnsFilter/server"
 )
 
 func main() {
+	var err error
+	
+	_, err = hosts.ParseUrl("https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts")
+	if err != nil {
+		panic(err)
+	}
+
 	resolver, err := server.NewServer()
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
