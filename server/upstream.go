@@ -2,7 +2,9 @@
 package server
 
 import (
+	"log"
 	"net"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -21,7 +23,6 @@ func getDnsServer() net.IP {
 // QueryUpstreamDns takes a pre-constructed DNS request message and sends it to an upstream DNS server. Then wait for
 // a response from that server and return it to the caller.
 // TODO: An obvious optimization here would be to have one goroutine that handles all traffic between here & upstream.
-// TODO: What do we do if we don't receive a response in a reasonable amount of time (i.e. when a packet is lost)
 func (s *dnsServer) QueryUpstreamDns(message *dnsmessage.Message) (dnsmessage.Message, error) {
 	packedMessage, err := message.Pack()
 	if err != nil {
@@ -45,7 +46,13 @@ func (s *dnsServer) QueryUpstreamDns(message *dnsmessage.Message) (dnsmessage.Me
 		return dnsmessage.Message{}, err
 	}
 
-	// Wait for the response to come back from upstream
+	// Wait for the response to come back from upstream. Note that we want to time out after a certain amount of
+	// time in case the UDP packet is lost. In that case, we simply pass the error back upstream and let them deal
+	// with it.
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		log.Printf("Failed to set deadline on UDP connection: %v", err)
+		return dnsmessage.Message{}, err
+	}
 	rxBuf := make([]byte, DefaultDnsPacketLength)
 	_, _, err = conn.ReadFromUDP(rxBuf)
 	if err != nil {
