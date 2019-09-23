@@ -60,6 +60,9 @@ func (s *dnsServer) getAnswersForQuestions(header *dnsmessage.Header, valid, inv
 		answers = append(answers, getAnswerForBlockedQuestion(&question))
 	}
 
+	// Query upstream for any requests that have been determined not to be blocked. Note that this can fail in cases
+	// where a UDP packet is lost. In this case, we want to simply abort, since the client will retry. To accomplish
+	// this, we return an error and the client will handle the error.
 	upstreamResponse, err := s.QueryUpstreamDns(&dnsmessage.Message{
 		Header:      *header,
 		Questions:   valid,
@@ -109,6 +112,8 @@ func (s *dnsServer) handleReceivedDnsRequest(buf []byte, remoteAddr *net.UDPAddr
 		Additionals: nil,
 	}
 
+	// Note: as mentioned above, this can fail if a UDP packet gets dropped. In this case, the UDP connection will
+	// time out, and pass back an error. We should simply abort this call and let the client retry the DNS request.
 	answers, err := s.getAnswersForQuestions(&msg.Header, valid, invalid)
 	if err != nil {
 		log.Printf("failed to get answers: %v", err)
