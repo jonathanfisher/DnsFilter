@@ -4,7 +4,9 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
+	"github.com/jonathanfisher/DnsFilter/statistics"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -19,6 +21,8 @@ type dnsServer struct {
 	domainListMutex sync.RWMutex
 	whitelist DomainList
 	blacklist DomainList
+
+	stats *statistics.Statistics
 }
 
 type DnsResolver interface {
@@ -79,6 +83,91 @@ func (s *dnsServer) getAnswersForQuestions(header *dnsmessage.Header, valid, inv
 	return answers, nil
 }
 
+// logResponse takes raw DNS response bytes and the requester's IP address as inputs, and crafts a log message
+// that can be passed to our statistics module that will update metrics accordingly. This seems pretty inefficient,
+// since we are unpacking a structure that we previously packed, but I couldn't come up with a good solution for
+// parsing dnsmessage.ResourceBody without using a dnsmessage.Parser, and those apparently only seem to work from a
+// complete byte-representation of a response.
+func (s *dnsServer) logResponse(response []byte, remoteIP net.IP) {
+	var parser dnsmessage.Parser
+	if _, err := parser.Start(response); err != nil {
+		log.Printf("failed to parse response: %v", err)
+		return
+	}
+
+	if err := parser.SkipAllQuestions(); err != nil && err != dnsmessage.ErrSectionDone {
+		log.Printf("failed to skip questions: %v", err)
+		return
+	}
+
+	for {
+		header, err := parser.AnswerHeader()
+		if err == dnsmessage.ErrSectionDone {
+			break
+		} else if err != nil {
+			log.Printf("failed to parse answer: %v", err)
+			return
+		} else if header.Class != dnsmessage.ClassINET {
+			log.Printf("invalid class: %v", header.Class)
+			if err = parser.SkipAnswer(); err != nil {
+				log.Printf("failed to skip answer: %v", err)
+				return
+			}
+			continue
+		}
+
+		switch header.Type {
+		case dnsmessage.TypeA:
+			if r, err := parser.AResource(); err != nil {
+				log.Printf("failed to parse AResource: %v", err)
+				if err = parser.SkipAnswer(); err != nil {
+					log.Printf("failed to skip answer: %v", err)
+					return
+				}
+			} else {
+				s.stats.LogEvent(statistics.Event{
+					Client:        remoteIP,
+					NameRequested: header.Name.String(),
+					IPResponse:    r.A[:],
+					Timestamp:     time.Now(),
+				})
+			}
+			break
+
+		case dnsmessage.TypeAAAA:
+			if r, err := parser.AAAAResource(); err != nil {
+				log.Printf("failed to parse AAAAResource: %v", err)
+				if err = parser.SkipAnswer(); err != nil {
+					log.Printf("failed to skip answer: %v", err)
+					return
+				}
+			} else {
+				s.stats.LogEvent(statistics.Event{
+					Client:        remoteIP,
+					NameRequested: header.Name.String(),
+					IPResponse:    r.AAAA[:],
+					Timestamp:     time.Now(),
+				})
+			}
+			break
+
+		default:
+			if err = parser.SkipAnswer(); err != nil {
+				log.Printf("failed to skip answer: %v", err)
+				return
+			}
+			continue
+		}
+
+		if err = parser.SkipAnswer(); err == dnsmessage.ErrSectionDone {
+			break
+		} else if err != nil {
+			log.Printf("failed to skip answer: %v", err)
+			return
+		}
+	}
+}
+
 // handleReceivedDnsRequest handles raw bytes that represent a DNS request, and filters the requests into valid and
 // invalid ones. Based on these results, a response is formulated and sent back to the remoteAddr.
 // NOTE: This is intended to be run as a goroutine, and as such, everything in this call should be thread-safe.
@@ -132,6 +221,9 @@ func (s *dnsServer) handleReceivedDnsRequest(buf []byte, remoteAddr *net.UDPAddr
 	if err != nil {
 		log.Printf("failed to write response to client: %v", err)
 	}
+
+	// Update the metrics with the information from the response
+	s.logResponse(txMsg, remoteAddr.IP)
 }
 
 // SetBlacklist sets the current dnsServer's whitelist to the given list. Note that this utilizes the mutex to be
@@ -176,13 +268,14 @@ func (s dnsServer) Listen() {
 
 // NewServer creates and returns a default DnsResolver
 func NewServer() DnsResolver {
-	return dnsServer{}
+	return dnsServer{stats: statistics.New()}
 }
 
 // NewServerWithFilters creates and returns a DnsResolver with the given whitelist and blacklist in place.
 func NewServerWithFilters(whitelist, blacklist DomainList) DnsResolver {
 	return dnsServer{
-		whitelist:       whitelist,
-		blacklist:       blacklist,
+		whitelist: whitelist,
+		blacklist: blacklist,
+		stats:     statistics.New(),
 	}
 }
